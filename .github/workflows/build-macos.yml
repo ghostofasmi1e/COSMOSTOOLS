@@ -1,0 +1,49 @@
+name: 构建 macOS 版云盘下载器
+
+on:
+  push:
+    paths:
+      - ".github/workflows/build-macos.yml"
+      - "mycloud_gui.py"
+      - "mycloud_download.py"
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-13   # Intel 芯片 Mac
+            tag: intel
+          - os: macos-14   # Apple Silicon 芯片 Mac
+            tag: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 安装 PyInstaller
+        run: pip install pyinstaller
+      - name: 打包 .app
+        run: |
+          pyinstaller --noconfirm --clean --windowed --onedir \
+            --name 云盘下载器 \
+            --osx-bundle-identifier com.wdcloud.downloader \
+            mycloud_gui.py
+          ls -la dist/
+      - name: 生成 DMG 安装包
+        run: |
+          hdiutil create -volname 云盘下载器 \
+            -srcfolder dist/云盘下载器.app \
+            -ov -format UDZO \
+            云盘下载器-${{ matrix.tag }}.dmg
+          ls -la
+      - name: 上传成品
+        uses: actions/upload-artifact@v4
+        with:
+          name: 云盘下载器-${{ matrix.tag }}
+          path: 云盘下载器-${{ matrix.tag }}.dmg
+          retention-days: 30
