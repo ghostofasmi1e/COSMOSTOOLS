@@ -32,7 +32,37 @@ import urllib.parse
 import urllib.request
 
 SHARE_SERVICE = "https://prod-gateway.wdckeystone.com/shares/v1/shares/"
-ctx = ssl.create_default_context()
+
+try:
+    import certifi  # type: ignore
+    ctx = ssl.create_default_context(cafile=certifi.where())
+except Exception:  # noqa: BLE001  无 certifi 时退回系统默认证书
+    ctx = ssl.create_default_context()
+_danger_ctx = ssl._create_unverified_context()
+_verify_failed = False
+_warn = lambda m: print("[警告] %s" % m)  # noqa: E731
+
+
+def set_warn(fn):
+    global _warn
+    _warn = fn
+
+
+def _open(req, timeout):
+    """打开 HTTPS 请求;证书验证失败时降级为不验证(仅一次警告)并重试。"""
+    global _verify_failed
+    try:
+        return urllib.request.urlopen(req, context=ctx, timeout=timeout)
+    except urllib.error.URLError as e:
+        reason = getattr(e, "reason", None)
+        if isinstance(reason, ssl.SSLCertVerificationError) or "CERTIFICATE_VERIFY_FAILED" in str(e):
+            if not _verify_failed:
+                _verify_failed = True
+                _warn("HTTPS 证书验证失败(缺少 CA 证书),已降级为不验证证书继续。"
+                      "建议 pip install certifi 恢复完整校验。")
+            return urllib.request.urlopen(req, context=_danger_ctx, timeout=timeout)
+        raise
+
 UA = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36",
     "Accept": "application/json, */*",
@@ -47,7 +77,7 @@ def http(method, url, bearer=None, timeout=120, retries=4):
     for attempt in range(retries):
         try:
             req = urllib.request.Request(url, headers=hdrs, method=method)
-            with urllib.request.urlopen(req, context=ctx, timeout=timeout) as r:
+            with _open(req, timeout) as r:
                 return r.status, dict(r.headers), r.read()
         except urllib.error.HTTPError as e:
             body = e.read()
@@ -86,6 +116,7 @@ def get_share(share_id, log=print):
 
 def run_download(share_url_or_id, out_dir, log=print):
     """批量下载分享内容。返回 (成功数, 失败数)。log 为回调,接收文本行。"""
+    set_warn(log)
     share_id = extract_ids(share_url_or_id)
     log("[0] 分享 ID: %s" % share_id)
     share = get_share(share_id, log=log)
