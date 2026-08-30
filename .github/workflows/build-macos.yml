@@ -21,12 +21,15 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
+
       - name: 安装 Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: 安装 PyInstaller
-        run: pip install pyinstaller
+
+      - name: 安装 PyInstaller(含 certifi 证书包)
+        run: pip install pyinstaller certifi
+
       - name: 打包 .app
         run: |
           pyinstaller --noconfirm --clean --windowed --onedir \
@@ -34,6 +37,7 @@ jobs:
             --osx-bundle-identifier com.wdcloud.downloader \
             mycloud_gui.py
           ls -la dist/
+
       - name: 生成 DMG 安装包
         run: |
           hdiutil create -volname 云盘下载器 \
@@ -41,6 +45,7 @@ jobs:
             -ov -format UDZO \
             云盘下载器-${{ matrix.tag }}.dmg
           ls -la
+
       - name: 上传成品
         uses: actions/upload-artifact@v4
         with:
