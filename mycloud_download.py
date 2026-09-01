@@ -21,6 +21,7 @@ WD My Cloud OS5 分享链接批量下载器
       普通文件: GET {device}/sdk/v2/files/{id}/content?download=true&access_token={token}
 """
 import argparse
+import concurrent.futures
 import json
 import os
 import re
@@ -114,8 +115,44 @@ def get_share(share_id, log=print):
     return d
 
 
-def run_download(share_url_or_id, out_dir, log=print):
-    """批量下载分享内容。返回 (成功数, 失败数)。log 为回调,接收文本行。"""
+def _download_item(base, token, fid, out_dir, log):
+    """下载单个分享项(文件夹整包 zip / 文件直下)。返回 (名称, 是否成功)。"""
+    # 元数据:名称/类型
+    st, _, body = http("GET", "%s/sdk/v2/files/%s" % (base, fid), bearer=token)
+    meta = {}
+    if st == 200:
+        try:
+            meta = json.loads(body.decode("utf-8", "replace"))
+        except Exception:
+            pass
+    name = meta.get("name") or ("item_%s" % fid[:8])
+    is_dir = (meta.get("mimeType") == "application/x.wd.dir") or meta.get("childCount") is not None
+    log("[3] %s  %s  childCount=%s" % ("[文件夹]" if is_dir else "[文件]", name, meta.get("childCount")))
+
+    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)[:80]
+    if is_dir:
+        url = "%s/sdk/v1/filesZip?ids=%s&access_token=%s" % (
+            base, urllib.parse.quote(fid), urllib.parse.quote(token))
+        save = os.path.join(out_dir, safe + ".zip")
+    else:
+        url = "%s/sdk/v2/files/%s/content?download=true&access_token=%s" % (
+            base, urllib.parse.quote(fid), urllib.parse.quote(token))
+        ext = os.path.splitext(name or "")[1] or ".bin"
+        save = os.path.join(out_dir, safe + ext)
+
+    st, hdrs, body = http("GET", url, timeout=600)
+    if st == 200:
+        with open(save, "wb") as f:
+            f.write(body)
+        log("[4] 已保存 %s  (%d 字节, %s)" % (os.path.basename(save), len(body), hdrs.get("Content-Type", "?")))
+        return name, True
+    log("[4] 失败 HTTP %s: %s" % (st, body[:200]))
+    return name, False
+
+
+def run_download(share_url_or_id, out_dir, log=print, parallel=1):
+    """批量下载分享内容。返回 (成功数, 失败数)。log 为回调,接收文本行。
+    parallel: 并行连接数(>1 时同一分享内的多个项目并发下载;链接之间仍按顺序排队)。"""
     set_warn(log)
     share_id = extract_ids(share_url_or_id)
     log("[0] 分享 ID: %s" % share_id)
@@ -128,41 +165,31 @@ def run_download(share_url_or_id, out_dir, log=print):
     log("[2] 设备基址: %s" % base)
 
     os.makedirs(out_dir, exist_ok=True)
+    fids = share.get("fileIds") or []
     n_ok = n_fail = 0
+    parallel = max(1, int(parallel))
 
-    for fid in share.get("fileIds") or []:
-        # 元数据:名称/类型
-        st, _, body = http("GET", "%s/sdk/v2/files/%s" % (base, fid), bearer=token)
-        meta = {}
-        if st == 200:
+    if parallel > 1 and len(fids) > 1:
+        log("[3] 开启并行下载: %d 路并发" % parallel)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as ex:
+            futures = [ex.submit(_download_item, base, token, fid, out_dir, log) for fid in fids]
+            for fut in futures:
+                try:
+                    _, ok = fut.result()
+                except Exception as e:  # noqa: BLE001
+                    log("[4] 项目下载异常: %s" % e)
+                    ok = False
+                n_ok += 1 if ok else 0
+                n_fail += 0 if ok else 1
+    else:
+        for fid in fids:
             try:
-                meta = json.loads(body.decode("utf-8", "replace"))
-            except Exception:
-                pass
-        name = meta.get("name") or ("item_%s" % fid[:8])
-        is_dir = (meta.get("mimeType") == "application/x.wd.dir") or meta.get("childCount") is not None
-        log("[3] %s  %s  childCount=%s" % ("[文件夹]" if is_dir else "[文件]", name, meta.get("childCount")))
-
-        safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)[:80]
-        if is_dir:
-            url = "%s/sdk/v1/filesZip?ids=%s&access_token=%s" % (
-                base, urllib.parse.quote(fid), urllib.parse.quote(token))
-            save = os.path.join(out_dir, safe + ".zip")
-        else:
-            url = "%s/sdk/v2/files/%s/content?download=true&access_token=%s" % (
-                base, urllib.parse.quote(fid), urllib.parse.quote(token))
-            ext = os.path.splitext(name or "")[1] or ".bin"
-            save = os.path.join(out_dir, safe + ext)
-
-        st, hdrs, body = http("GET", url, timeout=600)
-        if st == 200:
-            with open(save, "wb") as f:
-                f.write(body)
-            log("[4] 已保存 %s  (%d 字节, %s)" % (os.path.basename(save), len(body), hdrs.get("Content-Type", "?")))
-            n_ok += 1
-        else:
-            log("[4] 失败 HTTP %s: %s" % (st, body[:200]))
-            n_fail += 1
+                _, ok = _download_item(base, token, fid, out_dir, log)
+            except Exception as e:  # noqa: BLE001
+                log("[4] 项目下载异常: %s" % e)
+                ok = False
+            n_ok += 1 if ok else 0
+            n_fail += 0 if ok else 1
 
     log("完成:成功 %d,失败 %d,输出目录 %s" % (n_ok, n_fail, out_dir))
     return n_ok, n_fail
@@ -172,8 +199,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="WD My Cloud OS5 分享链接批量下载器")
     ap.add_argument("--share", required=True, help="分享链接或分享 ID")
     ap.add_argument("--out", required=True, help="保存目录")
+    ap.add_argument("--parallel", type=int, default=1, help="并行连接数(默认 1)")
     args = ap.parse_args(argv)
-    ok, fail = run_download(args.share, args.out)
+    ok, fail = run_download(args.share, args.out, parallel=args.parallel)
     return 0 if fail == 0 else 1
 
 

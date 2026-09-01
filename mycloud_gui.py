@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-WD My Cloud OS5 分享链接下载器 - 图形界面版(多链接排队)
-=========================================================
+WD 云盘下载器(多链接排队 + 并行下载)
+======================================
 用法: python mycloud_gui.py
 
 操作:粘贴分享链接(可多个,每行一个)→ 选择保存目录 → 点「开始下载」。
-多个链接按顺序排队下载,完成一个再下一个;下载过程实时显示日志。
+多个链接按顺序排队下载;勾选并行后,同一分享内的多个项目可并发下载。
 """
 import os
 import re
@@ -43,7 +43,7 @@ def parse_links(text):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("WD 云盘分享链接下载器(多链接排队)")
+        self.title("WD云盘下载器")
         self.geometry("840x640")
         self.minsize(680, 520)
         self.busy = False
@@ -74,6 +74,17 @@ class App(tk.Tk):
             "链接形如 https://os5.mycloud.com/action/share/xxxx,在云盘网页里对文件夹右键 → 分享 → 复制查看链接",
             foreground="#666",
         ).grid(row=2, column=0, columnspan=3, sticky="w", padx=8, pady=(2, 6))
+
+        opt = ttk.LabelFrame(frm, text="2. 下载选项")
+        opt.grid(row=3, column=0, columnspan=3, sticky="w", padx=8, pady=(2, 6))
+        self.var_parallel = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            opt, text="并行下载(同一分享内多个项目并发,可显著提速)", variable=self.var_parallel
+        ).pack(side="left", padx=6, pady=4)
+        ttk.Label(opt, text="并发数:").pack(side="left", padx=(14, 2))
+        self.var_workers = tk.IntVar(value=4)
+        spin = ttk.Spinbox(opt, from_=2, to=8, textvariable=self.var_workers, width=4)
+        spin.pack(side="left")
 
         btns = ttk.Frame(self)
         btns.pack(fill="x", padx=10, pady=4)
@@ -142,16 +153,17 @@ class App(tk.Tk):
         self.btn_start.configure(state="disabled")
         self.status.configure(text="下载中…")
         self._log("=" * 60)
-        self._log("共 %d 个链接,开始排队下载…" % len(links))
-        threading.Thread(target=self._worker, args=(links, out), daemon=True).start()
+        workers = self.var_workers.get() if self.var_parallel.get() else 1
+        self._log("共 %d 个链接,开始排队下载…(并行: %s)" % (len(links), "开 %d 路" % workers if workers > 1 else "关"))
+        threading.Thread(target=self._worker, args=(links, out, workers), daemon=True).start()
 
-    def _worker(self, links, out):
+    def _worker(self, links, out, workers):
         total_ok = total_fail = 0
         fails = []
         for i, link in enumerate(links, 1):
             self.after(0, self._log, "----- 链接 %d/%d: %s -----" % (i, len(links), self._short(link)))
             try:
-                ok, fail = run_download(link, out, log=lambda m: self.after(0, self._log, m))
+                ok, fail = run_download(link, out, log=lambda m: self.after(0, self._log, m), parallel=workers)
                 total_ok += ok
                 total_fail += fail
                 if fail:
